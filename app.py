@@ -9,6 +9,7 @@ Original file is located at
 
 import os
 import re
+import sys
 import json
 import pickle
 import subprocess
@@ -18,16 +19,6 @@ from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
 
 st.set_page_config(page_title="Spam Detection Platform", page_icon="📧", layout="wide")
 
-# -----------------------------
-# AUTO-TRAIN (FIX FOR GITHUB LIMIT)
-# -----------------------------
-if not os.path.exists("models/best_model.pkl"):
-    st.warning("⚙️ First run: Training model... please wait (1–2 minutes)")
-    subprocess.run(["python", "train_model.py"])
-
-# -----------------------------
-# PATHS
-# -----------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.path.join(BASE_DIR, "models")
 ASSETS_DIR = os.path.join(BASE_DIR, "assets")
@@ -35,9 +26,7 @@ CM_DIR = os.path.join(ASSETS_DIR, "confusion_matrices")
 
 CUSTOM_STOPWORDS = set(ENGLISH_STOP_WORDS)
 
-# -----------------------------
-# CLEANING FUNCTION
-# -----------------------------
+
 def clean_text(text: str) -> str:
     text = str(text).lower()
     text = re.sub(r"http\S+|www\S+", " ", text)
@@ -47,9 +36,42 @@ def clean_text(text: str) -> str:
     tokens = [w for w in text.split() if w not in CUSTOM_STOPWORDS]
     return " ".join(tokens)
 
-# -----------------------------
-# LOAD MODELS
-# -----------------------------
+
+def ensure_trained():
+    required_files = [
+        os.path.join(MODELS_DIR, "all_models.pkl"),
+        os.path.join(MODELS_DIR, "vectorizer.pkl"),
+        os.path.join(MODELS_DIR, "metadata.json"),
+        os.path.join(ASSETS_DIR, "comparison_results.csv"),
+    ]
+
+    if all(os.path.exists(path) for path in required_files):
+        return
+
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    os.makedirs(ASSETS_DIR, exist_ok=True)
+    os.makedirs(CM_DIR, exist_ok=True)
+
+    with st.spinner("First run: training model and generating assets... please wait (1–3 minutes)"):
+        result = subprocess.run(
+            [sys.executable, "train_model.py"],
+            cwd=BASE_DIR,
+            capture_output=True,
+            text=True,
+        )
+
+    if result.returncode != 0:
+        st.error("Model training failed during deployment.")
+        st.code(result.stdout + "\n" + result.stderr)
+        st.stop()
+
+    missing_after_training = [path for path in required_files if not os.path.exists(path)]
+    if missing_after_training:
+        st.error("Training finished, but some required files were not created.")
+        st.code("\n".join(missing_after_training))
+        st.stop()
+
+
 @st.cache_resource
 def load_resources():
     with open(os.path.join(MODELS_DIR, "all_models.pkl"), "rb") as f:
@@ -58,16 +80,13 @@ def load_resources():
     with open(os.path.join(MODELS_DIR, "vectorizer.pkl"), "rb") as f:
         vectorizer = pickle.load(f)
 
-    with open(os.path.join(MODELS_DIR, "metadata.json"), "r") as f:
+    with open(os.path.join(MODELS_DIR, "metadata.json"), "r", encoding="utf-8") as f:
         metadata = json.load(f)
 
     results_df = pd.read_csv(os.path.join(ASSETS_DIR, "comparison_results.csv"))
-
     return all_models, vectorizer, metadata, results_df
 
-# -----------------------------
-# PREDICTION
-# -----------------------------
+
 def predict_message(text, selected_key, all_models, vectorizer):
     clean_msg = clean_text(text)
     X = vectorizer.transform([clean_msg]).toarray()
@@ -81,108 +100,158 @@ def predict_message(text, selected_key, all_models, vectorizer):
 
     return pred, confidence, clean_msg
 
-# -----------------------------
-# MAIN APP
-# -----------------------------
+
 def main():
+    ensure_trained()
     all_models, vectorizer, metadata, results_df = load_resources()
 
     best_key = metadata["best_model_key"]
     dataset_summary = metadata["dataset_summary"]
 
     st.title("📧 Spam Detection Platform")
-    st.caption("Advanced Business Analytics Project | Live classification, model comparison, SMOTE analysis, and insights")
+    st.caption("Advanced Business Analytics Project | Live spam classification, model comparison, SMOTE analysis, and insights")
 
     tab1, tab2, tab3 = st.tabs(["🔍 Live Classifier", "📊 Model Comparison", "☁️ Insights"])
 
-    # -----------------------------
-    # TAB 1
-    # -----------------------------
     with tab1:
-        col1, col2 = st.columns([1.5, 1])
+        col_left, col_right = st.columns([1.5, 1])
 
-        with col1:
+        with col_left:
             st.subheader("Classify a Message")
 
             model_options = list(all_models.keys())
-            default_index = model_options.index(best_key)
+            default_index = model_options.index(best_key) if best_key in model_options else 0
 
             selected_model_key = st.selectbox(
                 "Choose model",
                 model_options,
-                index=default_index
+                index=default_index,
+                help="Default selection is the best-performing model based on F1-score.",
             )
 
             st.session_state.setdefault("message_box", "")
 
-            c1, c2, c3 = st.columns(3)
-
-            with c1:
+            sample_col1, sample_col2, sample_col3 = st.columns(3)
+            with sample_col1:
                 if st.button("Use Spam Example"):
-                    st.session_state["message_box"] = "Congratulations! You have won a free iPhone. Click now!"
-
-            with c2:
+                    st.session_state["message_box"] = "Congratulations! You have won a free iPhone. Click here now to claim your prize."
+            with sample_col2:
                 if st.button("Use Valid Example"):
-                    st.session_state["message_box"] = "Hi Mohammed, please review the meeting agenda."
-
-            with c3:
+                    st.session_state["message_box"] = "Hi Mohammed, please review the meeting agenda and share your comments by tomorrow."
+            with sample_col3:
                 if st.button("Clear Text"):
                     st.session_state["message_box"] = ""
 
-            user_text = st.text_area("Enter message", key="message_box", height=150)
+            user_text = st.text_area(
+                "Enter email or message text",
+                key="message_box",
+                height=180,
+                placeholder="Type a message here...",
+            )
 
             if st.button("Classify Message", use_container_width=True):
                 if not user_text.strip():
-                    st.warning("Please enter text")
+                    st.warning("Please enter a message first.")
                 else:
-                    pred, conf, cleaned = predict_message(
-                        user_text, selected_model_key, all_models, vectorizer
+                    prediction, confidence, cleaned = predict_message(
+                        text=user_text,
+                        selected_key=selected_model_key,
+                        all_models=all_models,
+                        vectorizer=vectorizer,
                     )
 
                     st.markdown("---")
+                    st.subheader("Prediction Result")
 
-                    if pred == 1:
-                        st.error(f"🚨 Spam ({conf:.2%})")
+                    if prediction == 1:
+                        if confidence is not None:
+                            st.error(f"🚨 Spam Email ({confidence:.2%} confidence)")
+                        else:
+                            st.error("🚨 Spam Email")
                     else:
-                        st.success(f"✅ Valid ({conf:.2%})")
+                        if confidence is not None:
+                            st.success(f"✅ Valid Email ({confidence:.2%} confidence)")
+                        else:
+                            st.success("✅ Valid Email")
 
-                    st.info(f"Model used: {selected_model_key}")
+                    st.info(f"Model used: **{selected_model_key}**")
+                    with st.expander("Show cleaned text used by the model"):
+                        st.write(cleaned)
 
-        with col2:
+        with col_right:
             st.subheader("Project Snapshot")
-
             st.metric("Total Messages", dataset_summary["rows"])
-            st.metric("Valid", dataset_summary["valid_count"])
-            st.metric("Spam", dataset_summary["spam_count"])
+            st.metric("Valid Messages", dataset_summary["valid_count"])
+            st.metric("Spam Messages", dataset_summary["spam_count"])
 
-            st.markdown("### Best Model")
-            st.write(best_key)
-            st.write(f"F1: {metadata['best_f1']}")
+            st.markdown("### Best Performing Model")
+            st.write(f"**{metadata['best_model_key']}**")
+            st.write(f"**F1-score:** {metadata['best_f1']:.4f}")
 
-    # -----------------------------
-    # TAB 2
-    # -----------------------------
+            st.markdown("### Preprocessing Applied")
+            st.write("- Lowercasing")
+            st.write("- Removal of hyperlinks")
+            st.write("- Removal of numbers")
+            st.write("- Removal of special characters")
+            st.write("- Removal of extra whitespaces")
+            st.write("- Removal of stop words")
+            st.write("- TF-IDF transformation")
+
     with tab2:
-        st.subheader("Model Comparison")
-        st.dataframe(results_df)
+        st.subheader("Performance Comparison Across 4 Models")
+        st.dataframe(results_df, use_container_width=True)
 
-    # -----------------------------
-    # TAB 3
-    # -----------------------------
+        before_df = results_df[results_df["Scenario"] == "Before SMOTE"].copy()
+        after_df = results_df[results_df["Scenario"] == "After SMOTE"].copy()
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("### Before SMOTE")
+            st.dataframe(before_df, use_container_width=True)
+        with col2:
+            st.markdown("### After SMOTE")
+            st.dataframe(after_df, use_container_width=True)
+
+        st.markdown("### Confusion Matrices")
+        selected_scenario = st.selectbox("Select scenario", results_df["Scenario"].unique())
+        selected_model = st.selectbox("Select model", results_df["Model"].unique())
+
+        cm_filename = f"{selected_scenario.lower().replace(' ', '_')}_{selected_model.lower().replace(' ', '_')}.png"
+        cm_path = os.path.join(CM_DIR, cm_filename)
+
+        if os.path.exists(cm_path):
+            st.image(cm_path, caption=f"{selected_model} - {selected_scenario}")
+        else:
+            st.warning("Confusion matrix image not found. Re-run training.")
+
     with tab3:
-        st.subheader("Insights")
+        st.subheader("Visual Insights")
+
+        wc_col1, wc_col2 = st.columns(2)
 
         valid_wc = os.path.join(ASSETS_DIR, "valid_wordcloud.png")
         spam_wc = os.path.join(ASSETS_DIR, "spam_wordcloud.png")
 
-        col1, col2 = st.columns(2)
+        with wc_col1:
+            st.markdown("### Valid Messages Word Cloud")
+            if os.path.exists(valid_wc):
+                st.image(valid_wc, use_container_width=True)
+            else:
+                st.warning("Valid word cloud not found.")
 
-        if os.path.exists(valid_wc):
-            col1.image(valid_wc, caption="Valid Messages")
+        with wc_col2:
+            st.markdown("### Spam Messages Word Cloud")
+            if os.path.exists(spam_wc):
+                st.image(spam_wc, use_container_width=True)
+            else:
+                st.warning("Spam word cloud not found.")
 
-        if os.path.exists(spam_wc):
-            col2.image(spam_wc, caption="Spam Messages")
+        st.markdown("### Key Findings")
+        st.write("- The project compares 4 classification models: KNN, Naive Bayes, Logistic Regression, and Random Forest.")
+        st.write("- Performance is evaluated using Accuracy, Precision, Recall, F1-score, and confusion matrices.")
+        st.write("- SMOTE is applied to the training set to address class imbalance and compare performance before and after balancing.")
+        st.write("- Word clouds help highlight the dominant terms in valid and spam messages.")
 
-# -----------------------------
+
 if __name__ == "__main__":
     main()
