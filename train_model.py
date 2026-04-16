@@ -63,7 +63,7 @@ def clean_text(text: str) -> str:
     text = str(text).lower()
     text = re.sub(r"http\S+|www\S+", " ", text)      # remove hyperlinks
     text = re.sub(r"\d+", " ", text)                 # remove numbers
-    text = re.sub(r"[^a-z\s]", " ", text)            # remove special chars
+    text = re.sub(r"[^a-z\s]", " ", text)            # remove special characters
     text = re.sub(r"\s+", " ", text).strip()         # remove extra whitespaces
     tokens = [w for w in text.split() if w not in CUSTOM_STOPWORDS]
     return " ".join(tokens)
@@ -115,13 +115,24 @@ def evaluate_model(model, X_train, y_train, X_test, y_test, model_name, scenario
     return model, metrics, cm_filename
 
 
+def get_models():
+    return {
+        "Naive Bayes": MultinomialNB(),
+        "KNN": KNeighborsClassifier(n_neighbors=5),
+        "Logistic Regression": LogisticRegression(max_iter=1000, random_state=RANDOM_STATE),
+        "Random Forest": RandomForestClassifier(
+            n_estimators=200,
+            random_state=RANDOM_STATE,
+            n_jobs=-1,
+        ),
+    }
+
+
 def main():
-    # -----------------------------
-    # 1) Load and prepare data
-    # -----------------------------
+    # 1) Load data
     df = pd.read_csv(DATA_PATH)
 
-    # Keep only needed columns
+    # Keep only required columns
     df = df.loc[:, [col for col in df.columns if col in ["class", "message"]]].copy()
 
     if "class" not in df.columns or "message" not in df.columns:
@@ -134,7 +145,7 @@ def main():
     df["class"] = df["class"].astype(int)
     df["clean_message"] = df["message"].apply(clean_text)
 
-    # Save dataset summary
+    # Dataset summary
     class_counts = df["class"].value_counts().to_dict()
     dataset_summary = {
         "rows": int(len(df)),
@@ -144,7 +155,7 @@ def main():
         "spam_pct": round(float((df["class"] == 1).mean() * 100), 2),
     }
 
-    # Word clouds
+    # 2) Word clouds
     save_wordcloud(
         df.loc[df["class"] == 0, "clean_message"],
         os.path.join(ASSETS_DIR, "valid_wordcloud.png"),
@@ -156,9 +167,7 @@ def main():
         "Spam Messages Word Cloud",
     )
 
-    # -----------------------------
-    # 2) Split + TF-IDF
-    # -----------------------------
+    # 3) Train/test split
     X_train_text, X_test_text, y_train, y_test = train_test_split(
         df["clean_message"],
         df["class"],
@@ -167,35 +176,18 @@ def main():
         stratify=df["class"],
     )
 
+    # 4) TF-IDF
     vectorizer = TfidfVectorizer(max_features=MAX_FEATURES)
     X_train = vectorizer.fit_transform(X_train_text)
     X_test = vectorizer.transform(X_test_text)
 
-    # Dense arrays for SMOTE / broad model compatibility
     X_train_dense = X_train.toarray().astype(np.float32)
     X_test_dense = X_test.toarray().astype(np.float32)
-
-    # -----------------------------
-    # 3) Define models
-    # -----------------------------
-    def get_models():
-        return {
-            "Naive Bayes": MultinomialNB(),
-            "KNN": KNeighborsClassifier(n_neighbors=5),
-            "Logistic Regression": LogisticRegression(max_iter=1000, random_state=RANDOM_STATE),
-            "Random Forest": RandomForestClassifier(
-                n_estimators=200,
-                random_state=RANDOM_STATE,
-                n_jobs=-1,
-            ),
-        }
 
     results = []
     trained_models = {}
 
-    # -----------------------------
-    # 4) Before SMOTE
-    # -----------------------------
+    # 5) Before SMOTE
     for model_name, model in get_models().items():
         fitted_model, metrics, _ = evaluate_model(
             model=model,
@@ -209,9 +201,7 @@ def main():
         results.append(metrics)
         trained_models[f"Before SMOTE::{model_name}"] = fitted_model
 
-    # -----------------------------
-    # 5) After SMOTE
-    # -----------------------------
+    # 6) After SMOTE
     smote = SMOTE(random_state=RANDOM_STATE)
     X_train_smote, y_train_smote = smote.fit_resample(X_train_dense, y_train)
 
@@ -228,17 +218,14 @@ def main():
         results.append(metrics)
         trained_models[f"After SMOTE::{model_name}"] = fitted_model
 
-    # -----------------------------
-    # 6) Save outputs
-    # -----------------------------
+    # 7) Save comparison results
     results_df = pd.DataFrame(results).sort_values(
         by=["Scenario", "F1", "Recall", "Accuracy"],
         ascending=[True, False, False, False]
     )
-    results_path = os.path.join(ASSETS_DIR, "comparison_results.csv")
-    results_df.to_csv(results_path, index=False)
+    results_df.to_csv(os.path.join(ASSETS_DIR, "comparison_results.csv"), index=False)
 
-    # Best model = highest F1, then Recall, then Accuracy
+    # 8) Select best model
     best_row = results_df.sort_values(
         by=["F1", "Recall", "Accuracy"],
         ascending=False
@@ -247,6 +234,7 @@ def main():
     best_key = f"{best_row['Scenario']}::{best_row['Model']}"
     best_model = trained_models[best_key]
 
+    # 9) Save models
     with open(os.path.join(MODELS_DIR, "best_model.pkl"), "wb") as f:
         pickle.dump(best_model, f)
 
@@ -256,6 +244,7 @@ def main():
     with open(os.path.join(MODELS_DIR, "vectorizer.pkl"), "wb") as f:
         pickle.dump(vectorizer, f)
 
+    # 10) Save metadata
     metadata = {
         "best_model_key": best_key,
         "best_model_name": str(best_row["Model"]),
